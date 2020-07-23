@@ -1,0 +1,716 @@
+name: {{FRAMEWORK_NAME}}
+scheduler:
+  principal: {{SERVICE_PRINCIPAL}}
+  user: {{SERVICE_USER}}
+pods:
+  {{#ALERTMANAGER_ENABLED}}
+  alertmanager:
+    count: 1
+    uris:
+      - {{ALERTMANAGER_URI}}
+      - {{ALERTMANAGER_CONFIG_URI}}
+      - {{FETCHER_URI}}
+    resource-sets:
+      reload-config-resources:
+        cpus: 0.1
+        memory: 32
+    volumes:
+      data:
+        path: data
+        type: {{ALERTMANAGER_DATA_VOLUME_TYPE}}
+        size: {{ALERTMANAGER_DATA_VOLUME_SIZE}}
+        {{#ALERTMANAGER_DATA_VOLUME_PROFILE}}
+        profiles:
+          - {{ALERTMANAGER_DATA_VOLUME_PROFILE}}
+        {{/ALERTMANAGER_DATA_VOLUME_PROFILE}}
+      config:
+        path: config
+        type: ROOT
+        size: 100
+      run:
+        path: run
+        type: ROOT
+        size: 10
+    share-pid-namespace: true
+    {{#ALERTMANAGER_SECRETS_SLACK_API_URL}}
+    secrets:
+    {{/ALERTMANAGER_SECRETS_SLACK_API_URL}}
+    {{^ALERTMANAGER_SECRETS_SLACK_API_URL}}
+    {{#ALERTMANAGER_CONFIG_REPOSITORY_CREDENTIALS_ENABLED}}
+    secrets:
+    {{/ALERTMANAGER_CONFIG_REPOSITORY_CREDENTIALS_ENABLED}}
+    {{^ALERTMANAGER_CONFIG_REPOSITORY_CREDENTIALS_ENABLED}}
+    {{#ALERTMANAGER_SECRETS_SMTP_AUTH_PASSWORD}}
+    secrets:
+    {{/ALERTMANAGER_SECRETS_SMTP_AUTH_PASSWORD}}
+    {{/ALERTMANAGER_CONFIG_REPOSITORY_CREDENTIALS_ENABLED}}
+    {{/ALERTMANAGER_SECRETS_SLACK_API_URL}}
+      {{#ALERTMANAGER_SECRETS_SLACK_API_URL}}
+      slack-api-url-secret:
+        secret: {{ALERTMANAGER_SECRETS_SLACK_API_URL}}
+        env-key: SECRETS_SLACK_API_URL
+      {{/ALERTMANAGER_SECRETS_SLACK_API_URL}}
+      {{#ALERTMANAGER_SECRETS_SMTP_AUTH_PASSWORD}}
+      smtp-auth-password-secret:
+        secret: {{ALERTMANAGER_SECRETS_SMTP_AUTH_PASSWORD}}
+        env-key: SECRETS_SMTP_AUTH_PASSWORD
+      {{/ALERTMANAGER_SECRETS_SMTP_AUTH_PASSWORD}}
+      {{#ALERTMANAGER_CONFIG_REPOSITORY_USERNAME}}
+      config-repository-username-secret:
+        secret: {{ALERTMANAGER_CONFIG_REPOSITORY_USERNAME}}
+        env-key: CONFIG_REPOSITORY_USERNAME
+      config-repository-password-secret:
+        secret: {{ALERTMANAGER_CONFIG_REPOSITORY_PASSWORD}}
+        env-key: CONFIG_REPOSITORY_PASSWORD
+      {{/ALERTMANAGER_CONFIG_REPOSITORY_USERNAME}}
+      {{#ALERTMANAGER_CONFIG_REPOSITORY_DEPLOY_KEY}}
+      config-repository-deploy-key-secret:
+        secret: {{ALERTMANAGER_CONFIG_REPOSITORY_DEPLOY_KEY}}
+        file: config_repository_deploy_key
+      {{/ALERTMANAGER_CONFIG_REPOSITORY_DEPLOY_KEY}}
+    tasks:
+      server:
+        goal: RUNNING
+        cmd: |
+            set -e
+
+            rm -f "${MESOS_SANDBOX}/run/alertmanager.pid"
+
+            {{#ALERTMANAGER_CONFIG_REPOSITORY_USERNAME}}
+            USERNAME="${CONFIG_REPOSITORY_USERNAME}" \
+            PASSWORD="${CONFIG_REPOSITORY_PASSWORD}" \
+            {{/ALERTMANAGER_CONFIG_REPOSITORY_USERNAME}}
+            {{#ALERTMANAGER_CONFIG_REPOSITORY_DEPLOY_KEY}}
+            DEPLOY_KEY_PATH="${MESOS_SANDBOX}/config_repository_deploy_key" \
+            {{/ALERTMANAGER_CONFIG_REPOSITORY_DEPLOY_KEY}}
+            ./fetcher \
+                git \
+                --url="{{ALERTMANAGER_CONFIG_REPOSITORY_URL}}" \
+                {{#ALERTMANAGER_CONFIG_REPOSITORY_REFERENCE_NAME}}
+                --reference-name="{{ALERTMANAGER_CONFIG_REPOSITORY_REFERENCE_NAME}}" \
+                {{/ALERTMANAGER_CONFIG_REPOSITORY_REFERENCE_NAME}}
+                --target="${MESOS_SANDBOX}/repository"
+
+            ./alertmanager-config \
+                --import-dir="${MESOS_SANDBOX}/repository/{{ALERTMANAGER_CONFIG_REPOSITORY_PATH}}" \
+                --config-dir="${MESOS_SANDBOX}/processed"
+
+            cp -rvf "${MESOS_SANDBOX}/processed/." "${MESOS_SANDBOX}/config/"
+
+            cd "${MESOS_SANDBOX}/config"
+
+            "${MESOS_SANDBOX}"/alertmanager-*/alertmanager \
+                --storage.path="${MESOS_SANDBOX}/data" \
+                --config.file=config.yml &
+
+            echo $! > "${MESOS_SANDBOX}/run/alertmanager.pid"
+
+            wait
+        cpus: {{ALERTMANAGER_CPUS}}
+        memory: {{ALERTMANAGER_MEM}}
+        ports:
+          alertmanager:
+            port: 9093
+            env-key: ALERTMANAGER_PORT
+            advertise: true
+            vip:
+              prefix: alertmanager
+              port: 9093
+        readiness-check:
+          cmd: |
+            curl -f -s "http://${MESOS_CONTAINER_IP}:9093/api/v1/alerts"
+          interval: 5
+          delay: 0
+          timeout: 10
+      reload-config:
+        essential: false
+        goal: ONCE
+        resource-set: reload-config-resources
+        cmd: |
+          set -e
+
+          {{#ALERTMANAGER_CONFIG_REPOSITORY_USERNAME}}
+          USERNAME="${CONFIG_REPOSITORY_USERNAME}" \
+          PASSWORD="${CONFIG_REPOSITORY_PASSWORD}" \
+          {{/ALERTMANAGER_CONFIG_REPOSITORY_USERNAME}}
+          {{#ALERTMANAGER_CONFIG_REPOSITORY_DEPLOY_KEY}}
+          DEPLOY_KEY_PATH="${MESOS_SANDBOX}/config_repository_deploy_key" \
+          {{/ALERTMANAGER_CONFIG_REPOSITORY_DEPLOY_KEY}}
+          ./fetcher \
+              git \
+              --url="{{ALERTMANAGER_CONFIG_REPOSITORY_URL}}" \
+              {{#ALERTMANAGER_CONFIG_REPOSITORY_REFERENCE_NAME}}
+              --reference-name="{{ALERTMANAGER_CONFIG_REPOSITORY_REFERENCE_NAME}}" \
+              {{/ALERTMANAGER_CONFIG_REPOSITORY_REFERENCE_NAME}}
+              --target="${MESOS_SANDBOX}/repository"
+
+          ./alertmanager-config \
+              --import-dir="${MESOS_SANDBOX}/repository/{{ALERTMANAGER_CONFIG_REPOSITORY_PATH}}" \
+              --config-dir="${MESOS_SANDBOX}/processed"
+
+          cp -rvf "${MESOS_SANDBOX}/processed/." "${MESOS_SANDBOX}/config/"
+
+          PID=$(cat "${MESOS_SANDBOX}/run/alertmanager.pid")
+          kill -s HUP "${PID}"
+    {{/ALERTMANAGER_ENABLED}}
+  prometheus:
+    {{#PROMETHEUS_PRERESERVED_ROLE}}
+    pre-reserved-role: {{PROMETHEUS_PRERESERVED_ROLE}}
+    {{/PROMETHEUS_PRERESERVED_ROLE}}
+    count: 1
+    placement: '{{{PROMETHEUS_PLACEMENT_CONSTRAINTS}}}'
+    uris:
+      - {{PROMETHEUS_URI}}
+      - {{BOOTSTRAP_URI}}
+      - {{DISCOVERY_HELPER_URI}}
+      - {{FETCHER_URI}}
+      - {{JQ_URI}}
+    resource-sets:
+      agent-discovery-resources:
+        cpus: 0.1
+        memory: 32
+      alert-rules-reload-resources:
+        cpus: 0.1
+        memory: 32
+    volumes:
+      discovery:
+        path: discovery
+        type: ROOT
+        size: 100
+      rules:
+        path: rules
+        type: ROOT
+        size: 100
+      storage:
+        path: storage
+        type: {{PROMETHEUS_VOLUME_TYPE}}
+        size: {{PROMETHEUS_VOLUME_SIZE}}
+        {{#PROMETHEUS_VOLUME_PROFILE}}
+        profiles:
+          - {{PROMETHEUS_VOLUME_PROFILE}}
+        {{/PROMETHEUS_VOLUME_PROFILE}}
+    {{#SERVICE_SERVICE_ACCOUNT_SECRET}}
+    secrets:
+    {{/SERVICE_SERVICE_ACCOUNT_SECRET}}
+    {{^SERVICE_SERVICE_ACCOUNT_SECRET}}
+    {{#PROMETHEUS_ALERT_RULES_REPOSITORY_CREDENTIALS_ENABLED}}
+    secrets:
+    {{/PROMETHEUS_ALERT_RULES_REPOSITORY_CREDENTIALS_ENABLED}}
+    {{^PROMETHEUS_ALERT_RULES_REPOSITORY_CREDENTIALS_ENABLED}}
+    {{#TASKCFG_ALL_PROMETHEUS_REMOTE_WRITE_BEARER_TOKEN_FILE}}
+    secrets:
+    {{/TASKCFG_ALL_PROMETHEUS_REMOTE_WRITE_BEARER_TOKEN_FILE}}
+    {{^TASKCFG_ALL_PROMETHEUS_REMOTE_WRITE_BEARER_TOKEN_FILE}}
+    {{#TASKCFG_ALL_PROMETHEUS_REMOTE_READ_BEARER_TOKEN_FILE}}
+    secrets:
+    {{/TASKCFG_ALL_PROMETHEUS_REMOTE_READ_BEARER_TOKEN_FILE}}
+    {{^TASKCFG_ALL_PROMETHEUS_REMOTE_READ_BEARER_TOKEN_FILE}}
+    {{#TASKCFG_ALL_PROMETHEUS_REMOTE_WRITE_TLS_CONFIG}}
+    secrets:
+    {{/TASKCFG_ALL_PROMETHEUS_REMOTE_WRITE_TLS_CONFIG}}
+    {{^TASKCFG_ALL_PROMETHEUS_REMOTE_WRITE_TLS_CONFIG}}
+    {{#TASKCFG_ALL_PROMETHEUS_REMOTE_READ_TLS_CONFIG}}
+    secrets:
+    {{/TASKCFG_ALL_PROMETHEUS_REMOTE_READ_TLS_CONFIG}}
+    {{/TASKCFG_ALL_PROMETHEUS_REMOTE_WRITE_TLS_CONFIG}}
+    {{/TASKCFG_ALL_PROMETHEUS_REMOTE_READ_BEARER_TOKEN_FILE}}
+    {{/TASKCFG_ALL_PROMETHEUS_REMOTE_WRITE_BEARER_TOKEN_FILE}}
+    {{/PROMETHEUS_ALERT_RULES_REPOSITORY_CREDENTIALS_ENABLED}}
+    {{/SERVICE_SERVICE_ACCOUNT_SECRET}}
+      {{#SERVICE_SERVICE_ACCOUNT_SECRET}}
+      credentials:
+        secret: {{SERVICE_SERVICE_ACCOUNT_SECRET}}
+        file: credentials.json
+      {{/SERVICE_SERVICE_ACCOUNT_SECRET}}
+      {{#PROMETHEUS_ALERT_RULES_REPOSITORY_USERNAME}}
+      alert-rules-repo-username-secret:
+        secret: {{PROMETHEUS_ALERT_RULES_REPOSITORY_USERNAME}}
+        env-key: ALERT_RULES_REPOSITORY_USERNAME
+      alert-rules-repo-password-secret:
+        secret: {{PROMETHEUS_ALERT_RULES_REPOSITORY_PASSWORD}}
+        env-key: ALERT_RULES_REPOSITORY_PASSWORD
+      {{/PROMETHEUS_ALERT_RULES_REPOSITORY_USERNAME}}
+      {{#PROMETHEUS_ALERT_RULES_REPOSITORY_DEPLOY_KEY}}
+      alert-rules-repo-deploy-key-secret:
+        secret: {{PROMETHEUS_ALERT_RULES_REPOSITORY_DEPLOY_KEY}}
+        file: deploy_key
+      {{/PROMETHEUS_ALERT_RULES_REPOSITORY_DEPLOY_KEY}}
+      {{#TASKCFG_ALL_PROMETHEUS_REMOTE_WRITE_BEARER_TOKEN_FILE}}
+      write-bearer-token-file:
+        secret: {{TASKCFG_ALL_PROMETHEUS_REMOTE_WRITE_BEARER_TOKEN_FILE}}
+        file: write_bearer_token_file
+      {{/TASKCFG_ALL_PROMETHEUS_REMOTE_WRITE_BEARER_TOKEN_FILE}}
+      {{#TASKCFG_ALL_PROMETHEUS_REMOTE_READ_BEARER_TOKEN_FILE}}
+      read-bearer-token-file:
+        secret: {{TASKCFG_ALL_PROMETHEUS_REMOTE_READ_BEARER_TOKEN_FILE}}
+        file: read_bearer_token_file
+      {{/TASKCFG_ALL_PROMETHEUS_REMOTE_READ_BEARER_TOKEN_FILE}}
+      {{#TASKCFG_ALL_PROMETHEUS_REMOTE_WRITE_CA_FILE}}
+      write-tls-ca-file:
+        secret: {{TASKCFG_ALL_PROMETHEUS_REMOTE_WRITE_CA_FILE}}
+        file: write_ca_file
+      {{/TASKCFG_ALL_PROMETHEUS_REMOTE_WRITE_CA_FILE}}
+      {{#TASKCFG_ALL_PROMETHEUS_REMOTE_WRITE_CERT_FILE}}
+      write-tls-cert-file:
+        secret: {{TASKCFG_ALL_PROMETHEUS_REMOTE_WRITE_CERT_FILE}}
+        file: write_cert_file
+      {{/TASKCFG_ALL_PROMETHEUS_REMOTE_WRITE_CERT_FILE}}
+      {{#TASKCFG_ALL_PROMETHEUS_REMOTE_WRITE_KEY_FILE}}
+      write-tls-key-file:
+        secret: {{TASKCFG_ALL_PROMETHEUS_REMOTE_WRITE_KEY_FILE}}
+        file: write_key_file
+      {{/TASKCFG_ALL_PROMETHEUS_REMOTE_WRITE_KEY_FILE}}
+      {{#TASKCFG_ALL_PROMETHEUS_REMOTE_READ_CA_FILE}}
+      read-tls-ca-file:
+        secret: {{TASKCFG_ALL_PROMETHEUS_REMOTE_READ_CA_FILE}}
+        file: read_ca_file
+      {{/TASKCFG_ALL_PROMETHEUS_REMOTE_READ_CA_FILE}}
+      {{#TASKCFG_ALL_PROMETHEUS_REMOTE_READ_CERT_FILE}}
+      read-tls-cert-file:
+        secret: {{TASKCFG_ALL_PROMETHEUS_REMOTE_READ_CERT_FILE}}
+        file: read_cert_file
+      {{/TASKCFG_ALL_PROMETHEUS_REMOTE_READ_CERT_FILE}}
+      {{#TASKCFG_ALL_PROMETHEUS_REMOTE_READ_KEY_FILE}}
+      read-tls-key-file:
+        secret: {{TASKCFG_ALL_PROMETHEUS_REMOTE_READ_KEY_FILE}}
+        file: read_key_file
+      {{/TASKCFG_ALL_PROMETHEUS_REMOTE_READ_KEY_FILE}}
+    tasks:
+      server:
+        goal: RUNNING
+        cmd: |
+            set -e
+
+            ./bootstrap
+
+            chmod +x "${MESOS_SANDBOX}/jq-linux64"
+
+            # Consider a better way to detect DC/OS variant.
+            DCOS_METADATA_FILE="/opt/mesosphere/active/dcos-metadata/etc/dcos-version.json"
+            DCOS_VARIANT=$(cat ${DCOS_METADATA_FILE} | "${MESOS_SANDBOX}/jq-linux64" -r '."dcos-variant"')
+            HTTP_SCHEME="https"
+            if [ "${DCOS_VARIANT}" != "enterprise" ]; then
+              HTTP_SCHEME="http"
+            fi
+
+            # Currently, I couldn't find a good way to get the public
+            # IP of any master from a task. Ideally, we should use
+            # that IP as the inferred Prometheus external URL host.
+            # Right now, I just put a placeholder.
+            EXTERNAL_HOST="localhost"
+
+            exec prometheus-*/prometheus --config.file=prometheus.yml \
+              --storage.tsdb.path="${MESOS_SANDBOX}/storage" \
+              --storage.tsdb.retention="{{PROMETHEUS_STORAGE_TSDB_RETENTION}}" \
+              {{#PROMETHEUS_MARATHON_LB_PROXY_ENABLED}}
+              {{#PROMETHEUS_MARATHON_LB_PROXY_VHOST}}
+              --web.external-url="${HTTP_SCHEME}://{{PROMETHEUS_MARATHON_LB_PROXY_VHOST}}" \
+              --web.route-prefix="/" \
+              {{/PROMETHEUS_MARATHON_LB_PROXY_VHOST}}
+              {{/PROMETHEUS_MARATHON_LB_PROXY_ENABLED}}
+              {{^PROMETHEUS_MARATHON_LB_PROXY_ENABLED}}
+              {{#PROMETHEUS_ADMIN_ROUTER_PROXY_ENABLED}}
+              {{#PROMETHEUS_ADMIN_ROUTER_PROXY_URL}}
+              --web.external-url="{{PROMETHEUS_ADMIN_ROUTER_PROXY_URL}}/service/{{SERVICE_NAME}}/prometheus" \
+              {{/PROMETHEUS_ADMIN_ROUTER_PROXY_URL}}
+              {{^PROMETHEUS_ADMIN_ROUTER_PROXY_URL}}
+              --web.external-url="${HTTP_SCHEME}://${EXTERNAL_HOST}/service/{{SERVICE_NAME}}/prometheus" \
+              {{/PROMETHEUS_ADMIN_ROUTER_PROXY_URL}}
+              --web.route-prefix="/" \
+              {{/PROMETHEUS_ADMIN_ROUTER_PROXY_ENABLED}}
+              {{/PROMETHEUS_MARATHON_LB_PROXY_ENABLED}}
+              --web.enable-admin-api \
+              --web.enable-lifecycle
+        env:
+          SCRAPE_INTERVAL: {{SCRAPE_INTERVAL}}
+          SCRAPE_TIMEOUT: {{SCRAPE_TIMEOUT}}
+          PROMETHEUS_DCOS_METRICS_NODE_PORT: {{PROMETHEUS_DCOS_METRICS_NODE_PORT}}
+        configs:
+          server-properties:
+            template: prometheus.yml
+            dest: prometheus.yml
+        cpus: {{PROMETHEUS_CPUS}}
+        memory: {{PROMETHEUS_MEM}}
+        readiness-check:
+          cmd: |
+            curl -f -s "http://${MESOS_CONTAINER_IP}:9090/-/ready"
+          interval: 5
+          delay: 0
+          timeout: 60
+        ports:
+          prometheus:
+            port: 9090
+            env-key: PROMETHEUS_PORT
+            advertise: true
+            vip:
+              prefix: prometheus
+              port: 9090
+      agent-discovery:
+        essential: false
+        goal: RUNNING
+        resource-set: agent-discovery-resources
+        cmd: |
+          set -e
+
+          ./bootstrap
+
+          chmod +x "${MESOS_SANDBOX}/jq-linux64"
+
+          # Consider a better way to detect DC/OS variant.
+          DCOS_METADATA_FILE="/opt/mesosphere/active/dcos-metadata/etc/dcos-version.json"
+          DCOS_VARIANT=$(cat ${DCOS_METADATA_FILE} | "${MESOS_SANDBOX}/jq-linux64" -r '."dcos-variant"')
+          TLS_CA_PATH=""
+          if [ "${DCOS_VARIANT}" == "enterprise" ]; then
+            TLS_CA_PATH=".ssl/ca-bundle.crt"
+          fi
+
+          ./discovery-helper \
+            {{#SERVICE_SERVICE_ACCOUNT_SECRET}}
+            -credential-path=credentials.json \
+            {{/SERVICE_SERVICE_ACCOUNT_SECRET}}
+            -tls-ca-path=${TLS_CA_PATH} \
+            -agent-port={{PROMETHEUS_DCOS_METRICS_NODE_PORT}} \
+            -token-interval={{DISCOVERY_HELPER_TOKEN_INTERVAL}}
+      {{#PROMETHEUS_ALERT_RULES_REPOSITORY_URL}}
+      reload-alert-rules:
+        essential: false
+        goal: ONCE
+        resource-set: alert-rules-reload-resources
+        cmd: |
+          set -e
+
+          {{#PROMETHEUS_ALERT_RULES_REPOSITORY_USERNAME}}
+          USERNAME="${ALERT_RULES_REPOSITORY_USERNAME}" \
+          PASSWORD="${ALERT_RULES_REPOSITORY_PASSWORD}" \
+          {{/PROMETHEUS_ALERT_RULES_REPOSITORY_USERNAME}}
+          {{#PROMETHEUS_ALERT_RULES_REPOSITORY_DEPLOY_KEY}}
+          DEPLOY_KEY_PATH="${MESOS_SANDBOX}/deploy_key" \
+          {{/PROMETHEUS_ALERT_RULES_REPOSITORY_DEPLOY_KEY}}
+          "${MESOS_SANDBOX}/fetcher" \
+              git \
+              --url="{{PROMETHEUS_ALERT_RULES_REPOSITORY_URL}}" \
+              {{#PROMETHEUS_ALERT_RULES_REPOSITORY_REFERENCE_NAME}}
+              --reference-name="{{PROMETHEUS_ALERT_RULES_REPOSITORY_REFERENCE_NAME}}" \
+              {{/PROMETHEUS_ALERT_RULES_REPOSITORY_REFERENCE_NAME}}
+              --target="${MESOS_SANDBOX}/repository"
+
+          rm -rf "${MESOS_SANDBOX}/rules/"*
+          cp -rvf \
+            "${MESOS_SANDBOX}/repository/{{PROMETHEUS_ALERT_RULES_REPOSITORY_PATH}}/." \
+            "${MESOS_SANDBOX}/rules/"
+
+          # For a service "infra/monitoring", the l4lb address will be
+          #   "prometheus.inframonitoring.l4lb.thisdcos.directory"
+          DNS_FRAMEWORK_NAME=$(echo "{{SERVICE_NAME}}" | sed 's/\///g')
+
+          curl -v -s \
+            -X POST \
+            "http://prometheus.${DNS_FRAMEWORK_NAME}.l4lb.thisdcos.directory:9090/-/reload"
+      {{/PROMETHEUS_ALERT_RULES_REPOSITORY_URL}}
+
+  grafana:
+    placement: '{{{GRAFANA_PLACEMENT_CONSTRAINTS}}}'
+    count: 1
+    image: {{GRAFANA_IMAGE}}
+    uris:
+      - {{BOOTSTRAP_URI}}
+      - {{DEFAULT_DASHBOARDS_MASTER_URI}}
+      - {{DEFAULT_DASHBOARDS_1_12_X_URI}}
+      - {{DEFAULT_DASHBOARDS_1_13_X_URI}}
+      - {{DEFAULT_DASHBOARDS_2_0_X_URI}}
+      - {{DASHBOARD_REFRESHER_URI}}
+      - {{FETCHER_URI}}
+      - {{JQ_URI}}
+    volume:
+      path: grafana-data
+      type: {{GRAFANA_DATA_VOLUME_TYPE}}
+      size: {{GRAFANA_DATA_VOLUME_SIZE}}
+      {{#GRAFANA_DATA_VOLUME_PROFILE}}
+      profiles:
+        - {{GRAFANA_DATA_VOLUME_PROFILE}}
+      {{/GRAFANA_DATA_VOLUME_PROFILE}}
+    host-volumes:
+      opt-mesosphere:
+        host-path: /opt/mesosphere/
+        container-path: opt-mesosphere
+    resource-sets:
+      sidecar-resources:
+        cpus: 0.1
+        memory: 256
+    {{#GRAFANA_ADMIN_CREDENTIALS_USERNAME}}
+    secrets:
+    {{/GRAFANA_ADMIN_CREDENTIALS_USERNAME}}
+    {{^GRAFANA_ADMIN_CREDENTIALS_USERNAME}}
+    {{#GRAFANA_DASHBOARD_CONFIG_REPOSITORY_CREDENTIALS_ENABLED}}
+    secrets:
+    {{/GRAFANA_DASHBOARD_CONFIG_REPOSITORY_CREDENTIALS_ENABLED}}
+    {{/GRAFANA_ADMIN_CREDENTIALS_USERNAME}}
+      {{#LDAP_HOST_SECRET}}
+      ldap-host:
+        secret: {{LDAP_HOST_SECRET}}
+        env-key: LDAP_HOST
+      ldap-password:
+        secret: {{LDAP_PASSWORD_SECRET}}
+        env-key: LDAP_PASSWORD
+      ldap-bind-dn:
+        secret: {{LDAP_BIND_DN_SECRET}}
+        env-key: LDAP_BIND_DN
+      ldap-search-base-dn:
+        secret: {{LDAP_SEARCH_BASE_DN_SECRET}}
+        env-key: LDAP_SEARCH_BASE_DN
+      {{/LDAP_HOST_SECRET}}
+      {{#GRAFANA_ADMIN_CREDENTIALS_USERNAME}}
+      grafana-admin-username:
+        secret: {{GRAFANA_ADMIN_CREDENTIALS_USERNAME}}
+        env-key: ADMIN_USERNAME
+      grafana-admin-password:
+        secret: {{GRAFANA_ADMIN_CREDENTIALS_PASSWORD}}
+        env-key: ADMIN_PASSWORD
+      {{/GRAFANA_ADMIN_CREDENTIALS_USERNAME}}
+      {{#GRAFANA_DASHBOARD_CONFIG_REPOSITORY_USERNAME}}
+      dashboard-config-repo-username-secret:
+        secret: {{GRAFANA_DASHBOARD_CONFIG_REPOSITORY_USERNAME}}
+        env-key: DASHBOARD_CONFIG_REPOSITORY_USERNAME
+      dashboard-config-repo-password-secret:
+        secret: {{GRAFANA_DASHBOARD_CONFIG_REPOSITORY_PASSWORD}}
+        env-key: DASHBOARD_CONFIG_REPOSITORY_PASSWORD
+      {{/GRAFANA_DASHBOARD_CONFIG_REPOSITORY_USERNAME}}
+      {{#GRAFANA_DASHBOARD_CONFIG_REPOSITORY_DEPLOY_KEY}}
+      dashboard-config-repo-deploy-key-secret:
+        secret: {{GRAFANA_DASHBOARD_CONFIG_REPOSITORY_DEPLOY_KEY}}
+        file: deploy_key
+      {{/GRAFANA_DASHBOARD_CONFIG_REPOSITORY_DEPLOY_KEY}}
+    tasks:
+      server:
+        goal: RUNNING
+        cpus: {{GRAFANA_CPUS}}
+        memory: {{GRAFANA_MEM}}
+        ports:
+          grafana:
+            port: {{GRAFANA_UI_PORT}}
+            advertise: true
+            vip:
+              prefix: grafana
+              port: 3000
+        cmd: |
+            set -e
+            
+            cd $MESOS_SANDBOX; 
+            ./bootstrap -install-certs=false -print-env=false -resolve=false -resolve-hosts='' -self-resolve=false -template=true;
+
+            ADMIN_USERNAME=${ADMIN_USERNAME:-"admin"}
+            ADMIN_PASSWORD=${ADMIN_PASSWORD:-"admin"}
+
+            cd /usr/share/grafana
+
+            GF_PATHS_DATA=$MESOS_SANDBOX/grafana-data/data \
+            GF_PATHS_LOGS=$MESOS_SANDBOX/grafana-data/logs \
+            GF_PATHS_PLUGINS=$MESOS_SANDBOX/grafana-data/plugins \
+            GF_SERVER_ENABLE_GZIP=true \
+            {{#GRAFANA_ADMIN_ROUTER_PROXY}}
+            GF_SERVER_ROOT_URL="%(protocol)s://%(domain)s/service/{{SERVICE_NAME}}/grafana/" \
+            {{/GRAFANA_ADMIN_ROUTER_PROXY}}
+            GF_SECURITY_ADMIN_USER="${ADMIN_USERNAME}" \
+            GF_SECURITY_ADMIN_PASSWORD="${ADMIN_PASSWORD}" \
+            {{#GRAFANA_USE_LIGHT_THEME}}
+            GF_USERS_DEFAULT_THEME="light" \
+            {{/GRAFANA_USE_LIGHT_THEME}}
+            bin/grafana-server -config $MESOS_SANDBOX/grafana.ini web
+        env:
+          GRAFANA_PORT: {{GRAFANA_UI_PORT}}
+        configs:
+          ldap-toml:
+            template: ldap.toml.mustache
+            dest: ldap.toml
+          grafana-ini:
+            template: grafana.ini.mustache
+            dest: grafana.ini
+        readiness-check:
+          cmd: |
+            set -e
+
+            export HOME=${MESOS_SANDBOX}
+            ADMIN_USERNAME=${ADMIN_USERNAME:-"admin"}
+            ADMIN_PASSWORD=${ADMIN_PASSWORD:-"admin"}
+            BASIC_AUTH=$(echo -n "${ADMIN_USERNAME}:${ADMIN_PASSWORD}" | base64 --wrap 0)
+
+            curl -f -s \
+              -H "Authorization: Basic ${BASIC_AUTH}" \
+              "http://${MESOS_CONTAINER_IP}:${GRAFANA_PORT}/api/admin/settings"
+          interval: 5
+          delay: 0
+          timeout: 60
+      add-data-sources:
+        goal: ONCE
+        resource-set: sidecar-resources
+        env:
+          GRAFANA_PORT: {{GRAFANA_UI_PORT}}
+        cmd: |
+          set -e
+
+          export HOME=${MESOS_SANDBOX}
+          ADMIN_USERNAME=${ADMIN_USERNAME:-"admin"}
+          ADMIN_PASSWORD=${ADMIN_PASSWORD:-"admin"}
+          BASIC_AUTH=$(echo -n "${ADMIN_USERNAME}:${ADMIN_PASSWORD}" | base64 --wrap 0)
+
+          curl -s \
+            -X POST \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Basic ${BASIC_AUTH}" \
+            -d '{"name":"prometheus","type":"prometheus","url":"'"http://prometheus-0-server.${FRAMEWORK_HOST}:9090"'","access":"proxy","basicAuth":false, "isDefault":true}' \
+            "http://${MESOS_CONTAINER_IP}:${GRAFANA_PORT}/api/datasources"
+      {{#GRAFANA_DEFAULT_DASHBOARDS}}
+      load-default-dashboards:
+        essential: false
+        goal: ONCE
+        resource-set: sidecar-resources
+        env:
+          GRAFANA_PORT: {{GRAFANA_UI_PORT}}
+        cmd: |
+          set -e
+
+          # Determine the 'branch' to use for dashboard. Default to 'master'.
+          # NOTE: This is very ugly due to the fact that SDK does not
+          # support container path to be absolute for host volumes.
+          OPT_MESOSPHERE="${MESOS_SANDBOX}/opt-mesosphere"
+          ACTIVE_DCOS_METADATA=$(readlink "${OPT_MESOSPHERE}/active/dcos-metadata" | sed -e "s#^/opt/mesosphere#${OPT_MESOSPHERE}#g")
+
+          chmod +x "${MESOS_SANDBOX}/jq-linux64"
+
+          DCOS_METADATA_FILE="${ACTIVE_DCOS_METADATA}/etc/dcos-version.json"
+          DCOS_VERSION=$(cat "${DCOS_METADATA_FILE}" | "${MESOS_SANDBOX}/jq-linux64" -r .version)
+          DCOS_MAJOR_MINOR=$(echo "${DCOS_VERSION}" | grep -E -o '^[0-9]+\.[0-9]+')
+
+          DASHBOARD_BRANCH="${DCOS_MAJOR_MINOR}.x"
+          if [ ! -d "${MESOS_SANDBOX}/${DASHBOARD_BRANCH}" ]; then
+            DASHBOARD_BRANCH="master"
+          fi
+
+          ADMIN_USERNAME=${ADMIN_USERNAME:-"admin"}
+          ADMIN_PASSWORD=${ADMIN_PASSWORD:-"admin"}
+
+          # Home dashboard is set to the Overview dashboard included in the
+          # default dashboards. Default dashboards are saved into a newly
+          # created Grafana folder.
+          GRAFANA_USERNAME="${ADMIN_USERNAME}" \
+          GRAFANA_PASSWORD="${ADMIN_PASSWORD}" \
+          "${MESOS_SANDBOX}/dashboard-refresher" \
+              --config-dir="${MESOS_SANDBOX}/${DASHBOARD_BRANCH}/dashboards" \
+              --grafana-url="http://${MESOS_CONTAINER_IP}:${GRAFANA_PORT}" \
+              --home-dashboard-uid="ACo4Hq1ik" \
+              --default-dashboards="true"
+      {{/GRAFANA_DEFAULT_DASHBOARDS}}
+      {{#GRAFANA_DASHBOARD_CONFIG_REPOSITORY_URL}}
+      reload-dashboard-configs:
+        essential: false
+        goal: ONCE
+        resource-set: sidecar-resources
+        env:
+          GRAFANA_PORT: {{GRAFANA_UI_PORT}}
+        cmd: |
+          set -e
+
+          ADMIN_USERNAME=${ADMIN_USERNAME:-"admin"}
+          ADMIN_PASSWORD=${ADMIN_PASSWORD:-"admin"}
+
+          {{#GRAFANA_DASHBOARD_CONFIG_REPOSITORY_USERNAME}}
+          USERNAME="${DASHBOARD_CONFIG_REPOSITORY_USERNAME}" \
+          PASSWORD="${DASHBOARD_CONFIG_REPOSITORY_PASSWORD}" \
+          {{/GRAFANA_DASHBOARD_CONFIG_REPOSITORY_USERNAME}}
+          {{#GRAFANA_DASHBOARD_CONFIG_REPOSITORY_DEPLOY_KEY}}
+          DEPLOY_KEY_PATH="${MESOS_SANDBOX}/deploy_key" \
+          {{/GRAFANA_DASHBOARD_CONFIG_REPOSITORY_DEPLOY_KEY}}
+          "${MESOS_SANDBOX}/fetcher" \
+              git \
+              --url="{{GRAFANA_DASHBOARD_CONFIG_REPOSITORY_URL}}" \
+              {{#GRAFANA_DASHBOARD_CONFIG_REPOSITORY_REFERENCE_NAME}}
+              --reference-name="{{GRAFANA_DASHBOARD_CONFIG_REPOSITORY_REFERENCE_NAME}}" \
+              {{/GRAFANA_DASHBOARD_CONFIG_REPOSITORY_REFERENCE_NAME}}
+              --target="${MESOS_SANDBOX}/repository"
+
+          GRAFANA_USERNAME="${ADMIN_USERNAME}" \
+          GRAFANA_PASSWORD="${ADMIN_PASSWORD}" \
+          "${MESOS_SANDBOX}/dashboard-refresher" \
+              --config-dir="${MESOS_SANDBOX}/repository/{{GRAFANA_DASHBOARD_CONFIG_REPOSITORY_PATH}}" \
+              --grafana-url="http://${MESOS_CONTAINER_IP}:${GRAFANA_PORT}"
+      {{/GRAFANA_DASHBOARD_CONFIG_REPOSITORY_URL}}
+
+  {{#PUSHGATEWAY_ENABLED}}
+  pushgateway:
+    count: 1
+    image: {{PUSHGATEWAY_IMAGE}}
+    tasks:
+      server:
+        goal: RUNNING
+        cmd: /bin/pushgateway
+        cpus: 0.1
+        memory: 256
+        ports:
+          pushgateway:
+            port: 9091
+            advertise: true
+            vip:
+              prefix: pushgateway
+              port: 9091
+  {{/PUSHGATEWAY_ENABLED}}
+
+plans:
+  deploy:
+    strategy: serial
+    phases:
+      {{#ALERTMANAGER_ENABLED}}
+      alertmanager:
+        pod: alertmanager
+        steps:
+          - default:
+            - [server]
+      {{/ALERTMANAGER_ENABLED}}
+      prometheus:
+        pod: prometheus
+        steps:
+          - default:
+            - [server]
+            - [agent-discovery]
+            {{#PROMETHEUS_ALERT_RULES_REPOSITORY_URL}}
+            - [reload-alert-rules]
+            {{/PROMETHEUS_ALERT_RULES_REPOSITORY_URL}}
+      grafana:
+        pod: grafana
+        steps:
+          - default:
+            - [server]
+            - [add-data-sources]
+            {{#GRAFANA_DEFAULT_DASHBOARDS}}
+            - [load-default-dashboards]
+            {{/GRAFANA_DEFAULT_DASHBOARDS}}
+            {{#GRAFANA_DASHBOARD_CONFIG_REPOSITORY_URL}}
+            - [reload-dashboard-configs]
+            {{/GRAFANA_DASHBOARD_CONFIG_REPOSITORY_URL}}
+      {{#PUSHGATEWAY_ENABLED}}
+      pushgateway:
+        pod: pushgateway
+      {{/PUSHGATEWAY_ENABLED}}
+  {{#ALERTMANAGER_ENABLED}}
+  reload-alertmanager-config:
+    phases:
+      reload:
+        pod: alertmanager
+        steps:
+          - default: [[reload-config]]
+  {{/ALERTMANAGER_ENABLED}}
+  {{#PROMETHEUS_ALERT_RULES_REPOSITORY_URL}}
+  reload-prometheus-alert-rules:
+    phases:
+      reload:
+        pod: prometheus
+        steps:
+          - default: [[reload-alert-rules]]
+  {{/PROMETHEUS_ALERT_RULES_REPOSITORY_URL}}
+  {{#GRAFANA_DASHBOARD_CONFIG_REPOSITORY_URL}}
+  reload-grafana-dashboard-configs:
+    phases:
+      reload:
+        pod: grafana
+        steps:
+          - default: [[reload-dashboard-configs]]
+  {{/GRAFANA_DASHBOARD_CONFIG_REPOSITORY_URL}}
